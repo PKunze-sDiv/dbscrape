@@ -1,0 +1,23 @@
+Package: dbscrape
+Title: A Structured Pipeline for Database-Centric Web Scraping
+Version: 0.0.0.9000
+Authors@R: person("Dein", "Name", email = "deine@email.de", role = c("aut", "cre"))
+Description: Facilitates robust web scraping by providing a job-based interface 
+    for defining, validating, and executing data extraction tasks. It supports 
+    optional browser simulation and user-agent rotation to bypass anti-scraping 
+    blocks, handles error logging, and writes structured data directly to SQL 
+    databases via DBI connections, with full support for complex many-to-many 
+    relationships.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Imports: 
+    chromote,
+    DBI,
+    dplyr,
+    dbplyr,
+    httr2,
+    rvest,
+    stringr,
+    tibble
+Config/roxygen2/version: 8.0.0
