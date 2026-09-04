@@ -607,9 +607,12 @@ scrp_check_zombie_processes <- function() {
     
     # basename säubern und eventuelle Whitespaces entfernen
     browser_exe <- trimws(basename(chrome_env))
+    # Fall generisch abfangen, falls chrome_env leer geblieben ist
+    if (browser_exe == "" || is.na(browser_exe)) browser_exe <- "chrome"
+    
+    process_running <- FALSE
     
     if (.Platform$OS.type == "windows") {
-        
         tasks <- tryCatch({
             system2("tasklist", args = c("/NH", "/FO", "CSV"), stdout = TRUE)
         }, error = function(e) NULL)
@@ -617,26 +620,39 @@ scrp_check_zombie_processes <- function() {
         if (!is.null(tasks)) {
             tasks_utf8 <- iconv(tasks, from = "latin1", to = "UTF-8", sub = "")
             process_running <- any(grepl(browser_exe, tasks_utf8, ignore.case = TRUE))
+        }
+        
+    } else {
+        # macOS / Linux
+        tasks <- tryCatch({
+            system2("pgrep", args = c("-f", browser_exe), stdout = TRUE)
+        }, error = function(e) NULL)
+        
+        if (!is.null(tasks) && length(tasks) > 0) {
+            process_running <- TRUE
+        }
+    }
+    
+    if (process_running) {
+        message(paste0("\nHinweis: Es laufen bereits Hintergrundprozesse von ", browser_exe, "."))
+        message("Diese können die Verbindung von chromote blockieren (Port-Konflikt).")
+        
+        if (interactive()) {
+            answer <- readline(prompt = paste0("Möchtest du alle laufenden ", browser_exe, "-Prozesse jetzt beenden? (j/n): "))
             
-            if (process_running) {
-                # paste0 verhindert ungewollte Leerzeichen vor Satzzeichen
-                message(paste0("\nHinweis: Es laufen bereits Hintergrundprozesse von ", browser_exe, "."))
-                message("Diese können die Verbindung von chromote blockieren (Port-Konflikt).")
-                
-                if (interactive()) {
-                    answer <- readline(prompt = paste0("Möchtest du alle laufenden ", browser_exe, "-Prozesse jetzt beenden? (j/n): "))
-                    
-                    if (tolower(answer) %in% c("j", "ja", "y", "yes")) {
-                        message("Beende Prozesse...")
-                        system2("taskkill", args = c("/F", "/IM", browser_exe), stdout = FALSE, stderr = FALSE)
-                        Sys.sleep(1)
-                    } else {
-                        message("Prozesse wurden nicht beendet. Falls gleich ein Port-Fehler auftritt, liegt es sehr wahrscheinlich daran.")
-                    }
+            if (tolower(answer) %in% c("j", "ja", "y", "yes")) {
+                message("Beende Prozesse...")
+                if (.Platform$OS.type == "windows") {
+                    system2("taskkill", args = c("/F", "/IM", browser_exe), stdout = FALSE, stderr = FALSE)
                 } else {
-                    warning(paste0("Laufende ", browser_exe, "-Instanzen detektiert. Im Headless-Modus kann dies zu Port-Fehlern führen."))
+                    system2("pkill", args = c("-f", browser_exe), stdout = FALSE,stderr = FALSE)
                 }
+                Sys.sleep(1)
+            } else {
+                message("Prozesse wurden nicht beendet. Falls gleich ein Port-Fehler auftritt, liegt es sehr wahrscheinlich daran.")
             }
+        } else {
+            warning(paste0("Laufende ", browser_exe, "-Instanzen detektiert. Im Headless-Modus kann dies zu Port-Fehlern führen."))
         }
     }
 }
@@ -713,13 +729,13 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #'     aufzurufenden Ziel-Adressen sowie optionale Metadaten. Falls \code{NULL}, 
 #'     versucht der Executor, die Daten aus der ersten in \code{target_tables} 
 #'     definierten Tabelle zu laden.
-#' @param url_column Charakter. Der Name der Spalte in der \code{input_table}, welche die 
+#' @param input_url_column Charakter. Der Name der Spalte in der \code{input_table}, welche die 
 #'     aufzurufenden URLs enthält (Standard: \code{"url"}).
 #' @param target_tables Eine benannte Liste, die die Ziel-Konfigurationen für die Datenbank enthält.
 #'     Jedes Element entspricht einer Tabelle und kann ein Vektor mit Namen der Primärschlüssel-Spalten, 
 #'     \code{NULL} (für reines Anhängen / Append-Tabellen mit Auto-ID) oder eine Liste mit folgenden Feldern sein:
 #'     \describe{
-#'         \item{\code{key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
+#'         \item{\code{target_key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
 #'         \item{\code{inherit_input_columns}}{Charakter-Vektor oder \code{NULL}. Namen von Spalten aus der \code{input_table}, die in diese spezifische Zieltabelle übernommen werden sollen (z. B. IDs oder auch die \code{"url"}).}
 #'     }
 #' @param validate_fn Eine optionale Funktion zur Inhalts- und Blockierungsprüfung des HTML-Dokuments.
@@ -734,7 +750,7 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #' @export
 scrp_define_job <- function(
     input_table = NULL,
-    url_column = "url",
+    input_url_column = "url",
     target_tables,
     validate_fn = NULL,
     extract_fn = NULL,
@@ -750,16 +766,16 @@ scrp_define_job <- function(
     for (table_name in names(target_tables)) {
         config <- target_tables[[table_name]]
         
-        # Komfort-Transformation (falls nur key_columns als Vektor übergeben wurden)
+        # Komfort-Transformation (falls nur target_key_columns als Vektor übergeben wurden)
         if (!is.list(config)) {
             config <- list(
-                key_columns = config,
+                target_key_columns = config,
                 inherit_input_columns = NULL
             )
         }
         
-        if (!"key_columns" %in% names(config)) {
-            config$key_columns <- NULL
+        if (!"target_key_columns" %in% names(config)) {
+            config$target_key_columns <- NULL
         }
         
         if (!"inherit_input_columns" %in% names(config)) {
@@ -772,7 +788,7 @@ scrp_define_job <- function(
     # 3. Zusammenbau
     job_args <- list(
         input_table           = input_table,
-        url_column            = url_column,
+        input_url_column      = input_url_column,
         target_tables         = target_tables,
         validate_fn           = validate_fn,
         extract_fn            = extract_fn,
@@ -810,7 +826,7 @@ scrp_run_job <- function(sc, job) {
             stop(paste("Fehler: Tabelle", input_table_name, "existiert nicht."))
         }
         
-        required_cols <- unique(c(job$url_column, all_inherited))
+        required_cols <- unique(c(job$input_url_column, all_inherited))
         job$input_table <- sc$con |> 
             dplyr::tbl(input_table_name) |> 
             dplyr::select(dplyr::all_of(required_cols)) |> 
@@ -822,11 +838,11 @@ scrp_run_job <- function(sc, job) {
         stop("Fehler: 'input_table' muss ein Data-Frame oder Tibble sein.")
     }
     
-    if (!job$url_column %in% names(job$input_table)) {
-        stop(paste("Fehler: Die URL-Spalte '", job$url_column, "' wurde in der 'input_table' nicht gefunden."))
+    if (!job$input_url_column %in% names(job$input_table)) {
+        stop(paste("Fehler: Die URL-Spalte '", job$input_url_column, "' wurde in der 'input_table' nicht gefunden."))
     }
     
-    urls <- job$input_table[[job$url_column]]
+    urls <- job$input_table[[job$input_url_column]]
     
     if (length(all_inherited) > 0) {
         missing_keys <- setdiff(all_inherited, names(job$input_table))
@@ -862,7 +878,7 @@ scrp_run_job <- function(sc, job) {
             # Speichern der Tabellen
             for (table_name in expected_tables) {
                 table_config <- job$target_tables[[table_name]]
-                table_keys   <- table_config$key_columns
+                table_keys   <- table_config$target_key_columns
                 raw_data     <- extracted_data[[table_name]]
                 
                 if (is.null(raw_data) || (is.data.frame(raw_data) && nrow(raw_data) == 0)) next
@@ -879,7 +895,7 @@ scrp_run_job <- function(sc, job) {
                     missing_keys <- setdiff(table_keys, names(raw_data))
                     if (length(missing_keys) > 0) {
                         stop(paste("Fehler: In den extrahierten Daten für Tabelle '", table_name, 
-                                   "' fehlen die definierten Schlüssel ('key_columns'):", 
+                                   "' fehlen die definierten Schlüssel ('target_key_columns'):", 
                                    paste(missing_keys, collapse = ", ")))
                     }
                 }

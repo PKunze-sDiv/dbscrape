@@ -5,8 +5,7 @@
 \title{Erstellt eine Scraping-Job-Konfiguration}
 \usage{
 scrp_define_job(
-  job_input = NULL,
-  input_keys = NULL,
+  input_table = NULL,
   input_url_column = "url",
   target_tables,
   validate_fn = NULL,
@@ -16,33 +15,29 @@ scrp_define_job(
 )
 }
 \arguments{
-\item{job_input}{Optional. Ein Data-Frame oder ein Vektor von URLs. Enthält die
-aufzurufenden Ziel-Adressen. Falls \code{NULL}, versucht der Executor, die URLs automatisch
-aus der ersten in \code{target_tables} definierten Tabelle zu laden.}
+\item{input_table}{Optional. Ein Data-Frame oder Tibble. Enthält die
+aufzurufenden Ziel-Adressen sowie optionale Metadaten. Falls \code{NULL},
+versucht der Executor, die Daten aus der ersten in \code{target_tables}
+definierten Tabelle zu laden.}
 
-\item{input_keys}{Charakter-Vektor. Die ID-Spalten aus dem \code{job_input} (z. B. \code{"pub_doi"}),
-die für die Requests identifizierend sind und als Fremdschlüssel an die Ziel-Tabellen
-weitergegeben werden können.}
-
-\item{input_url_column}{Charakter. Der Name der Spalte im \code{job_input}, welche die
+\item{input_url_column}{Charakter. Der Name der Spalte in der \code{input_table}, welche die
 aufzurufenden URLs enthält (Standard: \code{"url"}).}
 
 \item{target_tables}{Eine benannte Liste, die die Ziel-Konfigurationen für die Datenbank enthält.
-Jedes Element entspricht einer Tabelle und kann ein Vektor der Primärschlüssel-Spalte,
+Jedes Element entspricht einer Tabelle und kann ein Vektor mit Namen der Primärschlüssel-Spalten,
 \code{NULL} (für reines Anhängen / Append-Tabellen mit Auto-ID) oder eine Liste mit folgenden Feldern sein:
 \describe{
-\item{\code{key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden. Bei \code{NULL} werden Daten rein chronologisch angehängt (ideal für Auto-ID-Tabellen).}
-\item{\code{write_input_keys}}{Logisch. Bestimmt, ob die Identifikatoren aus \code{input_keys} automatisch in diese Tabelle geschrieben werden sollen (Standard: \code{TRUE}).}
-\item{\code{url_column}}{Charakter oder \code{NULL}. Der Spaltenname für die gescrapte URL. Standard ist \code{NULL} (es wird keine URL mitgespeichert, es sei denn, es wird explizit ein Spaltenname angegeben).}
+\item{\code{target_key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
+\item{\code{inherit_input_columns}}{Charakter-Vektor oder \code{NULL}. Namen von Spalten aus der \code{input_table}, die in diese spezifische Zieltabelle übernommen werden sollen (z. B. IDs oder auch die \code{"url"}).}
 }}
 
 \item{validate_fn}{Eine optionale Funktion zur Inhalts- und Blockierungsprüfung des HTML-Dokuments.}
 
-\item{extract_fn}{Eine Funktion zur Datenextraktion. Erwartet ein \code{xml2::xml_document}
-und muss eine benannte Liste von Tibbles/Data-Frames zurückgeben, deren Namen exakt
-mit den Schlüsseln in \code{target_tables} übereinstimmen.}
-
-\item{wait_min_seconds}{Numerisch. Minimale Wartezeit in Sekunden (Standard: 5).}
+\item{extract_fn}{Eine Funktion zur Datenextraktion. Erwartet das HTML-Dokument
+der Website (ein \code{xml2::xml_document}) und soll eine benannte Liste von
+Tibbles oder Data-Frames zurückgeben. Die Namen der Listenelemente müssen
+exakt den Tabellennamen in \code{target_tables} entsprechen.
+Die Spaltennamen innerhalb der jeweiligen Data-Frames bilden die Tabellenspalten ab.}
 
 \item{wait_max_seconds}{Numerisch. Maximale Wartezeit in Sekunden (Standard: 300).}
 }
