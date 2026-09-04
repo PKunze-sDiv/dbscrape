@@ -709,35 +709,32 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #' Die Funktion steuert, welche URLs verarbeitet werden sollen, wie der Inhalt extrahiert 
 #' wird und in welche Datenbanktabellen die Ergebnisse geschrieben werden.
 #'
-#' @param job_input Optional. Ein Data-Frame oder ein Vektor von URLs. Enthält die 
-#'     aufzurufenden Ziel-Adressen. Falls \code{NULL}, versucht der Executor, die URLs automatisch 
-#'     aus der ersten in \code{target_tables} definierten Tabelle zu laden.
-#' @param input_keys Charakter-Vektor. Die ID-Spalten aus dem \code{job_input} (z. B. \code{"pub_doi"}), 
-#'     die für die Requests identifizierend sind und als Fremdschlüssel an die Ziel-Tabellen 
-#'     weitergegeben werden können.
-#' @param input_url_column Charakter. Der Name der Spalte im \code{job_input}, welche die 
+#' @param input_table Optional. Ein Data-Frame oder Tibble. Enthält die 
+#'     aufzurufenden Ziel-Adressen sowie optionale Metadaten. Falls \code{NULL}, 
+#'     versucht der Executor, die Daten aus der ersten in \code{target_tables} 
+#'     definierten Tabelle zu laden.
+#' @param url_column Charakter. Der Name der Spalte in der \code{input_table}, welche die 
 #'     aufzurufenden URLs enthält (Standard: \code{"url"}).
 #' @param target_tables Eine benannte Liste, die die Ziel-Konfigurationen für die Datenbank enthält.
-#'     Jedes Element entspricht einer Tabelle und kann ein Vektor der Primärschlüssel-Spalte, 
+#'     Jedes Element entspricht einer Tabelle und kann ein Vektor mit Namen der Primärschlüssel-Spalten, 
 #'     \code{NULL} (für reines Anhängen / Append-Tabellen mit Auto-ID) oder eine Liste mit folgenden Feldern sein:
 #'     \describe{
-#'         \item{\code{key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden. Bei \code{NULL} werden Daten rein chronologisch angehängt (ideal für Auto-ID-Tabellen).}
-#'         \item{\code{write_input_keys}}{Logisch. Bestimmt, ob die Identifikatoren aus \code{input_keys} automatisch in diese Tabelle geschrieben werden sollen (Standard: \code{TRUE}).}
-#'         \item{\code{url_column}}{Charakter oder \code{NULL}. Der Spaltenname für die gescrapte URL. Standard ist \code{NULL} (es wird keine URL mitgespeichert, es sei denn, es wird explizit ein Spaltenname angegeben).}
+#'         \item{\code{key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
+#'         \item{\code{inherit_input_columns}}{Charakter-Vektor oder \code{NULL}. Namen von Spalten aus der \code{input_table}, die in diese spezifische Zieltabelle übernommen werden sollen (z. B. IDs oder auch die \code{"url"}).}
 #'     }
 #' @param validate_fn Eine optionale Funktion zur Inhalts- und Blockierungsprüfung des HTML-Dokuments.
-#' @param extract_fn Eine Funktion zur Datenextraktion. Erwartet ein \code{xml2::xml_document} 
-#'     und muss eine benannte Liste von Tibbles/Data-Frames zurückgeben, deren Namen exakt 
-#'     mit den Schlüsseln in \code{target_tables} übereinstimmen.
-#' @param wait_min_seconds Numerisch. Minimale Wartezeit in Sekunden (Standard: 5).
+#' @param extract_fn Eine Funktion zur Datenextraktion. Erwartet das HTML-Dokument 
+#'     der Website (ein \code{xml2::xml_document}) und soll eine benannte Liste von 
+#'     Tibbles oder Data-Frames zurückgeben. Die Namen der Listenelemente müssen 
+#'     exakt den Tabellennamen in \code{target_tables} entsprechen. 
+#'     Die Spaltennamen innerhalb der jeweiligen Data-Frames bilden die Tabellenspalten ab.
 #' @param wait_max_seconds Numerisch. Maximale Wartezeit in Sekunden (Standard: 300).
 #'
 #' @return Ein Objekt der Klasse \code{scrp_job}.
 #' @export
 scrp_define_job <- function(
-    job_input = NULL,
-    input_keys = NULL,
-    input_url_column = "url",
+    input_table = NULL,
+    url_column = "url",
     target_tables,
     validate_fn = NULL,
     extract_fn = NULL,
@@ -753,12 +750,11 @@ scrp_define_job <- function(
     for (table_name in names(target_tables)) {
         config <- target_tables[[table_name]]
         
-        # Komfort-Transformation
+        # Komfort-Transformation (falls nur key_columns als Vektor übergeben wurden)
         if (!is.list(config)) {
             config <- list(
                 key_columns = config,
-                write_input_keys = TRUE,
-                url_column = NULL
+                inherit_input_columns = NULL
             )
         }
         
@@ -766,31 +762,22 @@ scrp_define_job <- function(
             config$key_columns <- NULL
         }
         
-        if (is.null(config$write_input_keys)) config$write_input_keys <- TRUE
-        
-        # Standardmäßig auf NULL setzen, wenn nicht konkret angegeben
-        if (!"url_column" %in% names(config)) {
-            config$url_column <- NULL
+        if (!"inherit_input_columns" %in% names(config)) {
+            config$inherit_input_columns <- NULL
         }
         
         target_tables[[table_name]] <- config
     }
     
-    # 3. Validierung der Input-Quelle
-    if (is.null(input_keys) && is.null(job_input)) {
-        stop("Fehler: Wenn keine 'input_keys' angegeben sind, muss 'job_input' übergeben werden.")
-    }
-    
-    # 4. Zusammenbau
+    # 3. Zusammenbau
     job_args <- list(
-        target_tables    = target_tables,
-        job_input        = job_input,
-        input_keys       = input_keys,
-        input_url_column = input_url_column,
-        validate_fn      = validate_fn,
-        extract_fn       = extract_fn,
-        wait_min_seconds = wait_min_seconds,
-        wait_max_seconds = wait_max_seconds
+        input_table           = input_table,
+        url_column            = url_column,
+        target_tables         = target_tables,
+        validate_fn           = validate_fn,
+        extract_fn            = extract_fn,
+        wait_min_seconds      = wait_min_seconds,
+        wait_max_seconds      = wait_max_seconds
     )
     
     structure(job_args, class = "scrp_job")
@@ -811,44 +798,44 @@ scrp_run_job <- function(sc, job) {
         stop("Fehler: Das 'job'-Argument muss von der Klasse 'scrp_job' sein.")
     }
     
-    # Aliasse für bessere Lesbarkeit
-    input_data       <- job$job_input
-    src_url_col      <- job$input_url_column
-    target_tables    <- job$target_tables
+    # Alle Spalten, die irgendwo vererbt werden sollen, über alle Tabellen hinweg einsammeln
+    all_inherited <- unique(unlist(lapply(job$target_tables, function(cfg) cfg$inherit_input_columns)))
     
     # === AUTOMATISMUS: Input aus DB laden, falls NULL ===
-    if (!is.null(job$input_keys) && is.null(input_data)) {
-        source_table <- names(target_tables)[1]
+    if (is.null(job$input_table)) {
+        input_table_name <- names(job$target_tables)[1]
+        message(sprintf("Lade Input automatisch aus Tabelle '%s'...", input_table_name))
         
-        message(paste("Lade Input automatisch aus Tabelle:", source_table))
-        
-        required_cols <- unique(c(src_url_col, job$input_keys))
-        
-        if (!DBI::dbExistsTable(sc$con, source_table)) {
-            stop(paste("Fehler: Tabelle", source_table, "existiert nicht."))
+        if (!DBI::dbExistsTable(sc$con, input_table_name)) {
+            stop(paste("Fehler: Tabelle", input_table_name, "existiert nicht."))
         }
         
-        input_data <- sc$con |> 
-            dplyr::tbl(source_table) |> 
+        required_cols <- unique(c(job$url_column, all_inherited))
+        job$input_table <- sc$con |> 
+            dplyr::tbl(input_table_name) |> 
             dplyr::select(dplyr::all_of(required_cols)) |> 
             dplyr::collect()
     }
     
     # === VALIDIERUNG DES INPUTS ===
-    if (is.data.frame(input_data)) {
-        if (!src_url_col %in% names(input_data)) {
-            stop(paste("Fehler: Die Spalte '", src_url_col, "' wurde im Job-Input nicht gefunden."))
+    if (!is.data.frame(job$input_table)) {
+        stop("Fehler: 'input_table' muss ein Data-Frame oder Tibble sein.")
+    }
+    
+    if (!job$url_column %in% names(job$input_table)) {
+        stop(paste("Fehler: Die URL-Spalte '", job$url_column, "' wurde in der 'input_table' nicht gefunden."))
+    }
+    
+    urls <- job$input_table[[job$url_column]]
+    
+    if (length(all_inherited) > 0) {
+        missing_keys <- setdiff(all_inherited, names(job$input_table))
+        if (length(missing_keys) > 0) {
+            stop(paste(
+                "Fehler: Die folgenden in der Job-Konfiguration angeforderten Spalten wurden in der 'input_table' nicht gefunden:", 
+                paste(missing_keys, collapse = ", ")
+            ))
         }
-        urls <- input_data[[src_url_col]]
-        
-        if (!is.null(job$input_keys)) {
-            missing_keys <- setdiff(job$input_keys, names(input_data))
-            if (length(missing_keys) > 0) {
-                stop(paste("Fehler: Im Job-Input fehlen folgende 'input_keys':", paste(missing_keys, collapse = ", ")))
-            }
-        }
-    } else {
-        urls <- input_data
     }
     
     # === SCRAPING SCHLEIFE ===
@@ -857,7 +844,6 @@ scrp_run_job <- function(sc, job) {
         
         message(sprintf("Verarbeite URL %d/%d: %s", i, length(urls), url))
         
-        # Extraktion
         extracted_data <- scrp_execute(
             sc          = sc, 
             url         = url, 
@@ -867,8 +853,7 @@ scrp_run_job <- function(sc, job) {
         
         if (!is.null(extracted_data)) {
             
-            # Validierung: Entspricht das Ergebnis der Struktur?
-            expected_tables <- names(target_tables)
+            expected_tables <- names(job$target_tables)
             actual_tables   <- names(extracted_data)
             
             if (length(setdiff(expected_tables, actual_tables)) > 0) stop("Fehler: Extractor lieferte zu wenige Tabellen.")
@@ -876,25 +861,20 @@ scrp_run_job <- function(sc, job) {
             
             # Speichern der Tabellen
             for (table_name in expected_tables) {
-                table_config <- target_tables[[table_name]]
+                table_config <- job$target_tables[[table_name]]
                 table_keys   <- table_config$key_columns
                 raw_data     <- extracted_data[[table_name]]
                 
                 if (is.null(raw_data) || (is.data.frame(raw_data) && nrow(raw_data) == 0)) next
                 
-                # 1. Input-Keys (z.B. Fremdschlüssel) anheften
-                if (isTRUE(table_config$write_input_keys) && !is.null(job$input_keys)) {
-                    for (col in job$input_keys) {
-                        raw_data[[col]] <- input_data[[col]][i]
+                # 1. Vererbung von Spalten aus der input_table
+                if (!is.null(table_config$inherit_input_columns)) {
+                    for (col in table_config$inherit_input_columns) {
+                        raw_data[[col]] <- job$input_table[[col]][i]
                     }
                 }
                 
-                # 2. URL anheften
-                if (!is.null(table_config$url_column)) {
-                    raw_data[[table_config$url_column]] <- url
-                }
-                
-                # 3. Validierung der Schlüssel (nur wenn key_columns definiert sind)
+                # 2. Validierung der Schlüssel (nur bei Upsert-Tabellen)
                 if (!is.null(table_keys)) {
                     missing_keys <- setdiff(table_keys, names(raw_data))
                     if (length(missing_keys) > 0) {
@@ -904,7 +884,7 @@ scrp_run_job <- function(sc, job) {
                     }
                 }
                 
-                # 4. Schreiben in die DB (Upsert oder Append)
+                # 3. Schreiben in die DB
                 scrp_write_db(
                     sc           = sc, 
                     data_table   = raw_data, 
@@ -914,7 +894,6 @@ scrp_run_job <- function(sc, job) {
             }
         }
         
-        # Warten
         if (i < length(urls)) {
             wait_time <- stats::runif(1, job$wait_min_seconds, job$wait_max_seconds)
             Sys.sleep(wait_time)
