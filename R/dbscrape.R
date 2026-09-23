@@ -569,7 +569,7 @@ scrp_setup_browser <- function(path = NULL) {
         "/usr/bin/microsoft-edge",
         "/usr/bin/google-chrome",
         "/usr/bin/brave-browser",
-        "/usr/bin/chromium-browser"
+        "/usr/bin/chromium"
     )
     
     found_paths <- possible_paths[file.exists(possible_paths)]
