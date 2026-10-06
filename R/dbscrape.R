@@ -4,7 +4,7 @@
 
 
 
-script_version <- 0.6
+script_version <- 0.7
 
 
 
@@ -14,15 +14,115 @@ script_version <- 0.6
 
 
 
-#' Scraper Client erstellen (S3-Klasse): Ermöglicht Datenbankzugriff und Logging
+#' Interne Funktion: Stellt eine transiente Verbindung mit Retry-Logik her
+#' @keywords internal
+scrp_connect <- function(sc) {
+    pass <- sc$password
+    
+    # Wenn im Client kein Passwort hinterlegt ist, aber eine Env-Var definiert ist, dort suchen
+    if (is.null(pass) && !is.null(sc$env_var) && Sys.getenv(sc$env_var) != "") {
+        pass <- Sys.getenv(sc$env_var)
+    }
+    
+    # Verbindungsparameter zusammenbauen
+    args <- c(
+        list(drv = sc$driver),
+        if (!is.null(sc$dbname)) list(dbname = sc$dbname),
+        if (!is.null(sc$host)) list(host = sc$host),
+        if (!is.null(sc$port)) list(port = sc$port),
+        if (!is.null(sc$user)) list(user = sc$user),
+        if (!is.null(pass)) list(password = pass),
+        sc$extra_args
+    )
+    
+    # Retry-Wartezeiten: 10s, 1 Min, 5 Min, 20 Min
+    backoff_times <- c(10, 60, 300, 1200)
+    success <- FALSE
+    attempt <- 0
+    con <- NULL
+    
+    while (!success && attempt <= length(backoff_times)) {
+        tryCatch({
+            con <- do.call(DBI::dbConnect, args)
+            success <- TRUE
+        }, error = function(e) {
+            attempt <<- attempt + 1
+            if (attempt <= length(backoff_times)) {
+                wait_sec <- backoff_times[attempt]
+                warning(sprintf("Datenbankverbindung fehlgeschlagen (Versuch %d). Nächster Versuch in %d Sekunden. Fehler: %s", 
+                                attempt, wait_sec, e$message))
+                Sys.sleep(wait_sec)
+            } else {
+                stop(sprintf("Konnte nach mehreren Versuchen keine Verbindung zur Datenbank herstellen. Letzter Fehler: %s", e$message))
+            }
+        })
+    }
+    
+    return(con)
+}
+
+
+
+#' Scraper Client erstellen (S3-Klasse): Hält die Verbindungsparameter und instanziert Logging
 #'
-#' @param con Ein bestehendes DBI-Verbindungsobjekt (z.B. zu SQLite)
+#' @param driver Ein DBI-Treiber-Objekt (z.B. RSQLite::SQLite(), RPostgres::Postgres(), etc.)
+#' @param dbname Name der Datenbank oder Dateipfad (bei SQLite)
+#' @param host Server-Host (optional bei Remote-DBs)
+#' @param port Port (optional)
+#' @param user Benutzername (optional)
+#' @param password Direktes Passwort (optional)
+#' @param env_var Name der Umgebungsvariable für das Passwort (Standard: "DB_PASSWORD")
 #' @param log_table_name Name der Logging-Tabelle in der DB
+#' @param use_fake_browser Logisch. Ob chromote verwendet werden soll.
+#' @param ... Weitere treiberspezifische Parameter
 #'
-#' @return Ein S3-Objekt mit Datenbankverbindung und Kennung der Logging-Tabelle
+#' @return Ein S3-Scraper-Client-Objekt
 #'
 #' @export
-scrp_client <- function(con, log_table_name = "log", use_fake_browser = FALSE) {
+scrp_client <- function(
+    driver, 
+    dbname = NULL, 
+    host = NULL, 
+    port = NULL, 
+    user = NULL, 
+    password = NULL, 
+    env_var = "DB_PASSWORD",
+    log_table_name = "log", 
+    use_fake_browser = FALSE,
+    ...
+) {
+
+    # Passwort-Auflösung beim Start des Clients
+    resolved_pass <- NULL
+    if (!is.null(env_var) && Sys.getenv(env_var) != "") {
+        resolved_pass <- Sys.getenv(env_var)
+    } else if (!is.null(password)) {
+        resolved_pass <- password
+    } else if (interactive()) {
+        message("Kein Datenbank-Passwort in Umgebungsvariablen gefunden.")
+        resolved_pass <- readline(prompt = "Bitte Datenbank-Passwort eingeben: ")
+    }
+
+    # Temporäres Client-Objekt vorab zusammenbauen, damit scrp_connect darauf zugreifen kann
+    temp_sc <- structure(
+        list(
+            driver     = driver,
+            dbname     = dbname,
+            host       = host,
+            port       = port,
+            user       = user,
+            password   = resolved_pass,
+            env_var    = env_var,
+            extra_args = list(...),
+            log_table_name = log_table_name,
+            use_fake_browser = use_fake_browser
+        ), 
+        class = "scrp_client"
+    )
+
+    # Verbindung kurz für die Initialisierung öffnen und direkt wieder schließen
+    con <- scrp_connect(temp_sc)
+    on.exit(try(DBI::dbDisconnect(con), silent = TRUE), add = TRUE)
 
     # Settings-Tabelle initialisieren, falls nicht existent
     if (!DBI::dbExistsTable(con, "settings")) {
@@ -37,7 +137,6 @@ scrp_client <- function(con, log_table_name = "log", use_fake_browser = FALSE) {
             as.character(script_version)
         ))
     } else {
-        # Verion checken
         settings_data <- DBI::dbGetQuery(con, "SELECT * FROM settings") |> tibble::as_tibble()
         if (nrow(settings_data) != 1) {
             stop("Database settings table is corrupt.")
@@ -64,33 +163,24 @@ scrp_client <- function(con, log_table_name = "log", use_fake_browser = FALSE) {
         ))
     }
     
-    # S3-Objekt strukturieren
-    structure(
-        list(
-            con = con,
-            log_table_name = log_table_name,
-            use_fake_browser = use_fake_browser
-        ), 
-        class = "scrp_client"
-    )
-
+    return(temp_sc)
 }
 
 
 
 #' API-Schnittstelle: Status/Log in die DB schreiben
 #' 
-#' @param sc Das S3-Scraper-Client-Objekt
+#' @param con Connection zur Datenbank.
 #' @param url Die URL der betreffenden Seite
 #' @param status Der sinngemäße Status des Scraping-Versuchs (z.B. "success", "not found", "unavailable", "blocked", "redirected", "missing data")
 #' @param http_status Der Status der http request
-scrp_log_status <- function(sc, url, status, http_status = NA_character_) {
+scrp_log_status <- function(con, url, status, http_status = NA_character_, log_table_name) {
     
     current_time <- format(Sys.time(), tz = "UTC", format = "%Y-%m-%d %H:%M:%SZ")
     
     # Prüfen, ob die URL bereits in der Log-Tabelle existiert
-    query <- sprintf("SELECT 1 FROM %s WHERE url = ? LIMIT 1", sc$log_table_name)
-    url_exists <- nrow(DBI::dbGetQuery(sc$con, query, params = list(url))) > 0
+    query <- sprintf("SELECT 1 FROM %s WHERE url = ? LIMIT 1", log_table_name)
+    url_exists <- nrow(DBI::dbGetQuery(con, query, params = list(url))) > 0
     
     if (url_exists) {   # Update-Logik: Bestehenden Eintrag aktualisieren
 
@@ -105,11 +195,11 @@ scrp_log_status <- function(sc, url, status, http_status = NA_character_) {
                 successful_attempts_count = successful_attempts_count + %d,
                 in_use = 0
             WHERE url = ?", 
-            sc$log_table_name,
+            log_table_name,
             if (status == "success") 0L else 1L,
             if (status == "success") 1L else 0L
         )
-        DBI::dbExecute(sc$con, query, params = list(current_time, status, http_status, url))
+        DBI::dbExecute(con, query, params = list(current_time, status, http_status, url))
     
     } else {            # Insert-Logik für neue URLs via dplyr::rows_insert
 
@@ -122,59 +212,56 @@ scrp_log_status <- function(sc, url, status, http_status = NA_character_) {
             successful_attempts_count = if (status == "success") 1L else 0L,
             in_use = FALSE
         )
-        DBI::dbWriteTable(sc$con, sc$log_table_name, new_row, append = TRUE)
+        DBI::dbWriteTable(con, log_table_name, new_row, append = TRUE)
 
     }
     
-    # Zusätzliche Ausgabe in die R-Konsole zur Live-Kontrolle
-    message(sprintf("[%s] [%s] HTTP: %s", status, url, http_status))
-
 }
 
 
 
 #' Interne Schnittstelle: Daten in die Datenbank schreiben
 #' 
-#' @param sc Das S3-Scraper-Client-Objekt.
+#' @param con Connection zur Datenbank.
 #' @param data_table Das Tibble mit den zu schreibenden Daten.
 #' @param target_table Charakter. Name der Ziel-Tabelle.
-#' @param key_columns Charakter-Vektor oder \خاذ{NULL}. Die Primärschlüssel für den Abgleich. 
-#'     Falls \خاذ{NULL}, werden die Daten rein chronologisch angehängt (Append).
+#' @param key_columns Charakter-Vektor oder \code{NULL}. Die Primärschlüssel für den Abgleich. 
+#'     Falls \code{NULL}, werden die Daten rein chronologisch angehängt (Append).
 #' 
 #' @return Logisch. TRUE bei Erfolg, FALSE wenn keine Daten übergeben wurden.
 #' @keywords internal
-scrp_write_db <- function(sc, data_table, target_table, key_columns = NULL) {
+scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
     
     if (is.null(data_table) || nrow(data_table) == 0) {
         return(FALSE)
     }
     
-    table_existed <- DBI::dbExistsTable(sc$con, target_table)
+    table_existed <- DBI::dbExistsTable(con, target_table)
     
     if (!table_existed) {
         # Tabelle existiert noch nicht -> Struktur leeren und neu anlegen
-        DBI::dbWriteTable(sc$con, target_table, data_table |> dplyr::slice(0))
+        DBI::dbWriteTable(con, target_table, data_table |> dplyr::slice(0))
     } else {
         # Tabelle existiert -> Prüfen, ob neue Spalten dynamisch hinzugefügt werden müssen
-        existing_cols <- DBI::dbListFields(sc$con, target_table)
+        existing_cols <- DBI::dbListFields(con, target_table)
         new_cols <- setdiff(names(data_table), existing_cols)
         
         if (length(new_cols) > 0) {
             for (col in new_cols) {
                 query <- paste0("ALTER TABLE ", target_table, " ADD COLUMN ", col, " TEXT;")
-                DBI::dbExecute(sc$con, query)
+                DBI::dbExecute(con, query)
                 message(paste("Datenbank erweitert: Spalte", col, "zu Tabelle", target_table, "hinzugefügt."))
             }
         }
     }
     
-    # --- WEICHE: Append (keine Keys) vs. Upsert (mit Keys) ---
+    # WEICHE: Append (keine Keys) vs. Upsert (mit Keys)
     if (is.null(key_columns) || length(key_columns) == 0) {
         # Reines Anhängen (Append) für Auto-ID-Tabellen / Duplikate
-        DBI::dbWriteTable(sc$con, target_table, data_table, append = TRUE, row.names = FALSE)
+        DBI::dbWriteTable(con, target_table, data_table, append = TRUE, row.names = FALSE)
     } else {
         # Upsert-Logik für eindeutige Schlüssel
-        db_tbl <- dplyr::tbl(sc$con, target_table)
+        db_tbl <- dplyr::tbl(con, target_table)
         non_key_cols <- setdiff(names(data_table), key_columns)
         
         if (length(non_key_cols) == 0) {
@@ -188,7 +275,7 @@ scrp_write_db <- function(sc, data_table, target_table, key_columns = NULL) {
             )
         } else {
             check_query <- sprintf("SELECT 1 FROM %s LIMIT 1", target_table)
-            is_empty <- nrow(DBI::dbGetQuery(sc$con, check_query)) == 0
+            is_empty <- nrow(DBI::dbGetQuery(con, check_query)) == 0
             
             if (is_empty) {
                 dplyr::rows_insert(
@@ -222,59 +309,45 @@ scrp_write_db <- function(sc, data_table, target_table, key_columns = NULL) {
 
 
 
-#' Führt einen HTTP-GET Request aus und verwaltet Validierung, Extraktion sowie Status-Logging
+#' Führt den HTTP-Request oder Browser-Abruf für eine einzelne URL aus
 #'
-#' @description 
-#' Diese Kernfunktion kapselt den gesamten Netzwerk-Traffic des Scrapers. Sie führt genau einen 
-#' GET-Request pro URL aus, fängt typische HTTP- und Verbindungsfehler ab, validiert das 
-#' zurückgegebene HTML über optionale Callbacks und übergibt den finalen Status an die 
-#' Logging-Schnittstelle der Datenbank.
+#' @description
+#' Interne Engine zum Abrufen einer URL (entweder über \code{httr2} oder \code{chromote}),
+#' optionaler Validierung und anschließender Extraktion. Hat keine direkten Datenbank-Side-Effects.
 #'
-#' @param sc Ein S3-Scraper-Client-Objekt (erstellt mit \code{scrp_client()}), das die DB-Verbindung hält.
-#' @param url Charakter-String. Die vollständig qualifizierte Ziel-URL der Webseite.
-#' @param validate_fn Eine optionale Funktion zur Inhaltsprüfung (Prädikat). Muss das HTML der Website
-#'     akzeptieren und \code{TRUE} (Inhalt valide) oder \code{FALSE} (Inhalt blockiert/ungültig) zurückgeben.
-#' @param extract_fn Eine optionale Funktion zur Datenextraktion. Muss das HTML der Website akzeptieren 
-#'     und eine \code{benannte Liste von Tibbles/Data-Frames} (oder \code{NULL}) zurückgeben. Die Namen der 
-#'     Listenelemente müssen exakt mit den in \code{target_structures} definierten Tabellennamen übereinstimmen.
-#' @param fail_on_redirect Logisch. Bestimmt, ob der Prozess abgebrochen und als \code{"redirected"} 
-#'     geloggt werden soll, wenn der Server die URL intern umleitet.
-#'
-#' @return Gibt das Ergebnis der \code{extract_fn} zurück (eine benannte Liste von Tibbles), 
-#'     das rohe HTML-Objekt (falls keine \code{extract_fn} übergeben wurde) oder \code{NULL}, 
-#'     falls beim Request, der Validierung oder der Extraktion ein Fehler aufgetreten ist.
+#' @param url Character. Die abzurufende URL.
+#' @param validate_fn Funktion. Optionaler Validierungs-Callback, der das HTML-Dokument prüft.
+#' @param extract_fn Funktion. Optionaler Extraktions-Callback, der Daten aus dem HTML-Dokument extrahiert.
+#' @param fail_on_redirect Logical. Ob ein Redirect als Fehler gewertet werden soll.
+#' @param use_fake_browser Logical. Ob ein Headless-Browser via Chromote verwendet werden soll.
 #' 
-#' @export
-scrp_execute <- function(sc, url, validate_fn = NULL, extract_fn = NULL, fail_on_redirect = FALSE) {
+#' @return Eine Liste mit den Elementen \code{status}, \code{http_status} und \code{data}.
+#' @keywords internal
+scrp_execute <- function(
+    url,
+    validate_fn = NULL,
+    extract_fn = NULL,
+    fail_on_redirect = FALSE,
+    use_fake_browser = FALSE
+) {
     
-    fetch_result <- if (sc$use_fake_browser) {      # WEG A: Ressourcen-intensive Browser-Simulation (chromote)
-        
+    # 1. Fetch-Logik: Entweder über Fake-Browser (Chromote) oder klassisch via httr2
+    fetch_result <- if (use_fake_browser) {      
         if (Sys.getenv("CHROMOTE_CHROME") == "") scrp_setup_browser()
-        #scrp_check_zombie_processes()
 
         tryCatch({
             b <- chromote::ChromoteSession$new()
             b$Page$navigate(url)
-            
-            # Zufällige Wartezeit, um menschliches Verhalten zu simulieren
             Sys.sleep(stats::runif(1, 4, 10))
-            
             html_string <- b$Runtime$evaluate("document.documentElement.outerHTML")$result$value
             html <- rvest::read_html(html_string)
             b$close()
-            
             list(html = html, http_status = "200")
-            
         }, error = function(e) {
-            message("=== CHROMOTE FEHLER DETEKTIERT ===")
-            print(e)
-            message("==================================")
-            scrp_log_status(sc, url, "unavailable", "BROWSER_ERROR")
             NULL
         })
         
-    } else {                                        # WEG B: Ressourcenschonender HTTP-Request (httr2 / libcurl)
-
+    } else {
         browser_id <- get_random_browser_identity()
 
         req <- httr2::request(url) |> 
@@ -288,11 +361,10 @@ scrp_execute <- function(sc, url, validate_fn = NULL, extract_fn = NULL, fail_on
             resp <- httr2::req_perform(req)
             http_status <- as.character(httr2::resp_status(resp))
             
-            # Redirect-Prüfung
+            # Prüfen auf unerwünschte Weiterleitungen
             final_url <- httr2::resp_url(resp)
             if (fail_on_redirect && scrp_has_redirect(url, final_url)) {
-                scrp_log_status(sc, url, "redirected", http_status)
-                return(NULL)
+                return(list(status = "redirected", http_status = http_status, data = NULL))
             }
             
             list(html = httr2::resp_body_html(resp), http_status = http_status)
@@ -304,54 +376,44 @@ scrp_execute <- function(sc, url, validate_fn = NULL, extract_fn = NULL, fail_on
                 http_status %in% c("403", "429") ~ "blocked",
                 TRUE ~ "unavailable"
             )
-            scrp_log_status(sc, url, status_string, http_status)
-            NULL
+            return(list(status = status_string, http_status = http_status, data = NULL))
             
         }, error = function(e) {
-            scrp_log_status(sc, url, "unavailable", "CONNECTION_ERROR")
-            NULL
+            return(list(status = "unavailable", http_status = "CONNECTION_ERROR", data = NULL))
         })
     }
     
-    # Falls beim Laden (Weg A oder B) etwas schiefgelaufen ist, brechen wir hier ab
-    if (is.null(fetch_result)) {
-        return(NULL)
+    # Fehlerbehandlung beim Fetch-Vorgang
+    if (is.null(fetch_result) || !is.null(fetch_result$status)) {
+        if (!is.null(fetch_result$status)) return(fetch_result)
+        return(list(status = "unavailable", http_status = "BROWSER_ERROR", data = NULL))
     }
     
-    # Werte für die Weiterverarbeitung entpacken
     html        <- fetch_result$html
     http_status <- fetch_result$http_status
     
-    # Validierung der Seite
+    # 2. Validierung des HTML-Inhalts
     if (!is.null(validate_fn)) {
-        is_valid <- validate_fn(html)
-        if (!is_valid) {
-            scrp_log_status(sc, url, "missing data", http_status)
-            return(NULL)
+        if (!validate_fn(html)) {
+            return(list(status = "missing data", http_status = http_status, data = NULL))
         }
     }
     
-    # Extraktion & Erfolgsprüfung
+    # 3. Datenextraktion
     if (!is.null(extract_fn)) {
         extracted_data <- extract_fn(html)
-        
         is_empty <- is.null(extracted_data) || 
             length(extracted_data) == 0 || 
             all(sapply(extracted_data, function(df) is.data.frame(df) && nrow(df) == 0))
         
         if (is_empty) {
-            scrp_log_status(sc, url, "missing data", http_status)
-            return(NULL)
+            return(list(status = "missing data", http_status = http_status, data = NULL))
         }
         
-        scrp_log_status(sc, url, "success", http_status)
-        return(extracted_data)
+        return(list(status = "success", http_status = http_status, data = extracted_data))
     }
     
-    # Fallback: Rohes HTML bei Erfolg zurückgeben, falls kein Extractor definiert ist
-    scrp_log_status(sc, url, "success", http_status)
-    return(html)
-
+    return(list(status = "success", http_status = http_status, data = html))
 }
 
 
@@ -688,8 +750,10 @@ scrp_create_table <- function(sc, table_name, col_names, domains = "TEXT") {
     # Benanntes Vektor-Mapping für DBI erstellen
     fields <- stats::setNames(domains, col_names)
     
-    # Tabelle direkt über DBI-Treiber anlegen
-    DBI::dbCreateTable(sc$con, table_name, fields)
+    # Tabelle in DB anlegen
+    con <- scrp_connect(sc)
+    DBI::dbCreateTable(con, table_name, fields)
+    DBI::dbDisconnect(con)
     
     message(sprintf("Tabelle '%s' erfolgreich in der Datenbank erstellt.", table_name))
     invisible(TRUE)
@@ -704,7 +768,9 @@ scrp_create_table <- function(sc, table_name, col_names, domains = "TEXT") {
 #' @param file_path Pfad zur Ziel-CSV
 #' @export
 scrp_export_csv <- function(sc, table_name, file_path) {
-    data <- dplyr::tbl(sc$con, table_name) |> dplyr::collect()
+    con <- scrp_connect(sc)
+    data <- dplyr::tbl(con, table_name) |> dplyr::collect()
+    DBI::dbDisconnect(con)
     readr::write_csv(data, file_path) # Oder utils::write.csv, um kein readr zu erzwingen
     message(sprintf("Tabelle '%s' erfolgreich nach '%s' exportiert.", table_name, file_path))
     invisible(data)
@@ -745,6 +811,11 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #'     exakt den Tabellennamen in \code{target_tables} entsprechen. 
 #'     Die Spaltennamen innerhalb der jeweiligen Data-Frames bilden die Tabellenspalten ab.
 #' @param wait_max_seconds Numerisch. Maximale Wartezeit in Sekunden (Standard: 300).
+#' @param batch_size Positive Ganzzahl. Anzahl an URLs, die abgearbeitet werden, bevor
+#'     Daten in die Datenbank geschrieben werden (Standard: 1). Bei NULL werden alle 
+#'     Daten im Arbeitsspeicher gesammelt und erst nach dem Scraping aller URLs in die
+#'     Datenbank geschrieben. Dient der Ausbalancierung von Arbeitsspeichernutzung und
+#'     Datenbankzugriffen.
 #'
 #' @return Ein Objekt der Klasse \code{scrp_job}.
 #' @export
@@ -755,14 +826,23 @@ scrp_define_job <- function(
     validate_fn = NULL,
     extract_fn = NULL,
     wait_min_seconds = 5,
-    wait_max_seconds = 300
+    wait_max_seconds = 300,
+    batch_size = 1
 ) {
-    # 1. Validierung der target_tables
+    # 1. Validierung von batch_size
+    if (!is.null(batch_size)) {
+        if (!is.numeric(batch_size) || length(batch_size) != 1 || is.na(batch_size) || batch_size <= 0) {
+            stop("Fehler: 'batch_size' muss eine positive ganze Zahl (z.B. 1, 50) oder NULL (gebündelt am Ende) sein.")
+        }
+        batch_size <- as.integer(batch_size)
+    }
+
+    # 2. Validierung der target_tables
     if (!is.list(target_tables) || is.null(names(target_tables)) || any(names(target_tables) == "")) {
         stop("Fehler: 'target_tables' muss eine benannte Liste von Tabellen-Konfigurationen sein.")
     }
     
-    # 2. Detail-Validierung der Tabellen-Konfigurationen
+    # 3. Detail-Validierung der Tabellen-Konfigurationen
     for (table_name in names(target_tables)) {
         config <- target_tables[[table_name]]
         
@@ -785,7 +865,7 @@ scrp_define_job <- function(
         target_tables[[table_name]] <- config
     }
     
-    # 3. Zusammenbau
+    # 4. Zusammenbau
     job_args <- list(
         input_table           = input_table,
         input_url_column      = input_url_column,
@@ -793,7 +873,8 @@ scrp_define_job <- function(
         validate_fn           = validate_fn,
         extract_fn            = extract_fn,
         wait_min_seconds      = wait_min_seconds,
-        wait_max_seconds      = wait_max_seconds
+        wait_max_seconds      = wait_max_seconds,
+        batch_size            = batch_size
     )
     
     structure(job_args, class = "scrp_job")
@@ -817,23 +898,27 @@ scrp_run_job <- function(sc, job) {
     # Alle Spalten, die irgendwo vererbt werden sollen, über alle Tabellen hinweg einsammeln
     all_inherited <- unique(unlist(lapply(job$target_tables, function(cfg) cfg$inherit_input_columns)))
     
-    # === AUTOMATISMUS: Input aus DB laden, falls NULL ===
+    # AUTOMATISMUS: Falls input NULL, aus DB laden
     if (is.null(job$input_table)) {
         input_table_name <- names(job$target_tables)[1]
         message(sprintf("Lade Input automatisch aus Tabelle '%s'...", input_table_name))
         
-        if (!DBI::dbExistsTable(sc$con, input_table_name)) {
-            stop(paste("Fehler: Tabelle", input_table_name, "existiert nicht."))
+        con <- scrp_connect(sc)
+        if (!DBI::dbExistsTable(con, input_table_name)) {
+            DBI::dbDisconnect(con)
+            stop(paste("Fehler: Tabelle", input_table_name, "existiert nicht in Datenbank."))
         }
         
         required_cols <- unique(c(job$input_url_column, all_inherited))
-        job$input_table <- sc$con |> 
+        job$input_table <- con |> 
             dplyr::tbl(input_table_name) |> 
             dplyr::select(dplyr::all_of(required_cols)) |> 
             dplyr::collect()
+        
+        DBI::dbDisconnect(con)
     }
     
-    # === VALIDIERUNG DES INPUTS ===
+    # VALIDIERUNG DES INPUTS
     if (!is.data.frame(job$input_table)) {
         stop("Fehler: 'input_table' muss ein Data-Frame oder Tibble sein.")
     }
@@ -841,8 +926,6 @@ scrp_run_job <- function(sc, job) {
     if (!job$input_url_column %in% names(job$input_table)) {
         stop(paste("Fehler: Die URL-Spalte '", job$input_url_column, "' wurde in der 'input_table' nicht gefunden."))
     }
-    
-    urls <- job$input_table[[job$input_url_column]]
     
     if (length(all_inherited) > 0) {
         missing_keys <- setdiff(all_inherited, names(job$input_table))
@@ -854,28 +937,81 @@ scrp_run_job <- function(sc, job) {
         }
     }
     
-    # === SCRAPING SCHLEIFE ===
+    # BATCHING-STRUKTUR: Input-Daten in Batches aufteilen
+    total_rows <- nrow(job$input_table)
+    b_size <- if (is.null(job$batch_size)) total_rows else job$batch_size
+    batch_indices <- split(seq_len(total_rows), ceiling(seq_len(total_rows) / b_size))
+    
+    message(sprintf("Starte Job: %d URLs aufgeteilt in %d Batch(es).", total_rows, length(batch_indices)))
+    
+    # SCHLEIFE ÜBER DIE BATCHES
+    for (b_idx in seq_along(batch_indices)) {
+        rows_in_batch <- batch_indices[[b_idx]]
+        batch_data <- job$input_table[rows_in_batch, , drop = FALSE]
+        
+        message(sprintf("\n--- Verarbeite Batch %d/%d (%d URLs) ---", b_idx, length(batch_indices), nrow(batch_data)))
+        
+        scrp_run_batch(sc = sc, job = job, batch_data = batch_data)
+    }
+    
+    return(invisible(TRUE))
+}
+
+
+
+#' Führt einen Scraping-Batch für eine Liste von URLs aus
+#'
+#' @description
+#' Iteriert über alle URLs eines Batches, ruft die Engine (\code{scrp_execute}) auf,
+#' puffert sowohl die extrahierten Datentabellen als auch die Status-Logs im Arbeitsspeicher
+#' und schreibt am Ende des Batches alles in einer einmaligen Datenbank-Transaktion weg.
+#'
+#' @param sc Liste. Die Client-Konfiguration.
+#' @param job Liste. Die Job-Definition inklusive Zieltabellen und Parametern.
+#' @param batch_data Dataframe. Die Daten des aktuellen Batches (inklusive URL-Spalte).
+#' 
+#' @return Unsichtbar \code{TRUE} bei erfolgreichem Durchlauf.
+#' @keywords internal
+scrp_run_batch <- function(sc, job, batch_data) {
+    urls <- batch_data[[job$input_url_column]]
+    expected_tables <- names(job$target_tables)
+    
+    # Puffer-Strukturen für diesen Batch im Arbeitsspeicher
+    data_buffers <- stats::setNames(replicate(length(expected_tables), list(), simplify = FALSE), expected_tables)
+    log_buffer <- list()
+    
+    # SCRAPING SCHLEIFE (läuft komplett ohne offene DB-Verbindung im Hintergrund)
     for (i in seq_along(urls)) {
         url <- urls[i]
         
         message(sprintf("Verarbeite URL %d/%d: %s", i, length(urls), url))
         
-        extracted_data <- scrp_execute(
-            sc          = sc, 
-            url         = url, 
-            validate_fn = job$validate_fn, 
-            extract_fn  = job$extract_fn
+        # Request ausführen (liefert Daten und Status zurück, ohne DB-Side-Effects)
+        res <- scrp_execute(
+            url              = url, 
+            validate_fn      = job$validate_fn, 
+            extract_fn       = job$extract_fn,
+            use_fake_browser = sc$use_fake_browser
         )
         
-        if (!is.null(extracted_data)) {
-            
-            expected_tables <- names(job$target_tables)
-            actual_tables   <- names(extracted_data)
+        # Status-Log für den Batch-Puffer vormerken
+        log_buffer <- append(log_buffer, list(list(
+            url         = url, 
+            status      = res$status, 
+            http_status = res$http_status
+        )))
+        
+        message(sprintf(" -> Status: %s (HTTP: %s)", res$status, res$http_status))
+        
+        # Wenn der Scraping-Vorgang erfolgreich war, Daten weiterverarbeiten
+        if (res$status == "success" && !is.null(res$data)) {
+            extracted_data <- res$data
+            actual_tables <- names(extracted_data)
             
             if (length(setdiff(expected_tables, actual_tables)) > 0) stop("Fehler: Extractor lieferte zu wenige Tabellen.")
             if (length(setdiff(actual_tables, expected_tables)) > 0) stop("Fehler: Extractor lieferte unbekannte Tabellen.")
             
-            # Speichern der Tabellen
+            # Speichern der Tabellen im lokalen Puffer
             for (table_name in expected_tables) {
                 table_config <- job$target_tables[[table_name]]
                 table_keys   <- table_config$target_key_columns
@@ -886,7 +1022,7 @@ scrp_run_job <- function(sc, job) {
                 # 1. Vererbung von Spalten aus der input_table
                 if (!is.null(table_config$inherit_input_columns)) {
                     for (col in table_config$inherit_input_columns) {
-                        raw_data[[col]] <- job$input_table[[col]][i]
+                        raw_data[[col]] <- batch_data[[col]][i]
                     }
                 }
                 
@@ -895,25 +1031,71 @@ scrp_run_job <- function(sc, job) {
                     missing_keys <- setdiff(table_keys, names(raw_data))
                     if (length(missing_keys) > 0) {
                         stop(paste("Fehler: In den extrahierten Daten für Tabelle '", table_name, 
-                                   "' fehlen die definierten Schlüssel ('target_key_columns'):", 
-                                   paste(missing_keys, collapse = ", ")))
+                                   "' fehlen die definierten Schlüssel:", paste(missing_keys, collapse = ", ")))
                     }
                 }
                 
-                # 3. Schreiben in die DB
+                data_buffers[[table_name]] <- append(data_buffers[[table_name]], list(raw_data))
+            }
+        }
+        
+        # Wartezeit zwischen den Requests einhalten (falls nicht die letzte URL)
+        if (i < length(urls)) {
+            Sys.sleep(stats::runif(1, job$wait_min_seconds, job$wait_max_seconds))
+        }
+    }
+    
+    # FLUSH: Verbindung wird für diesen Batch einmalig geöffnet und am Ende wieder geschlossen
+    message(sprintf(">>> FLUSH: Schreibe Batch-Ergebnisse in die Datenbank (%d URLs)...", length(urls)))
+    con <- scrp_connect(sc)
+    on.exit(try(DBI::dbDisconnect(con), silent = TRUE), add = TRUE)
+    
+    # TRANSAKTION STARTEN: Garantiert Konsistenz (Entweder alles oder nichts)
+    DBI::dbBegin(con)
+    
+    success <- tryCatch({
+        
+        # 1. Gesammelte Datentabellen in die DB schreiben
+        for (table_name in expected_tables) {
+            if (length(data_buffers[[table_name]]) > 0) {
+                combined_data <- dplyr::bind_rows(data_buffers[[table_name]])
+                table_config <- job$target_tables[[table_name]]
+                
                 scrp_write_db(
-                    sc           = sc, 
-                    data_table   = raw_data, 
+                    con          = con, 
+                    data_table   = combined_data, 
                     target_table = table_name, 
-                    key_columns  = table_keys
+                    key_columns  = table_config$target_key_columns
                 )
             }
         }
         
-        if (i < length(urls)) {
-            wait_time <- stats::runif(1, job$wait_min_seconds, job$wait_max_seconds)
-            Sys.sleep(wait_time)
+        # 2. Gesammelte Logs gebatcht in die DB schreiben
+        if (length(log_buffer) > 0) {
+            for (log_entry in log_buffer) {
+                scrp_log_status(
+                    con            = con, 
+                    url            = log_entry$url, 
+                    status         = log_entry$status, 
+                    http_status    = log_entry$http_status, 
+                    log_table_name = sc$log_table_name
+                )
+            }
         }
+        
+        # Wenn alles geklappt hat, Transaktion bestätigen
+        DBI::dbCommit(con)
+        TRUE
+        
+    }, error = function(e) {
+        # Bei jedem Fehler: Transaktion komplett rückgängig machen!
+        DBI::dbRollback(con)
+        warning(paste("Fehler beim Flush-Vorgang. Transaktion wurde zurückgerollt:", e$message))
+        FALSE
+    })
+    
+    if (!success) {
+        stop("Datenbank konnte nicht beschrieben werden. Programm wird abgebrochen.")
     }
     
     return(invisible(TRUE))
