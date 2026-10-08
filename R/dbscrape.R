@@ -92,17 +92,22 @@ scrp_client <- function(
     ...
 ) {
 
-    # Passwort-Auflösung beim Start des Clients
-    resolved_pass <- NULL
-    if (!is.null(env_var) && Sys.getenv(env_var) != "") {
-        resolved_pass <- Sys.getenv(env_var)
-    } else if (!is.null(password)) {
-        resolved_pass <- password
-    } else if (interactive()) {
-        message("Kein Datenbank-Passwort in Umgebungsvariablen gefunden.")
-        resolved_pass <- readline(prompt = "Bitte Datenbank-Passwort eingeben: ")
-    }
+    # Prüfen, ob es sich um einen SQLite-Treiber handelt
+    is_sqlite <- inherits(driver, "SQLiteDriver")
 
+    # Passwort-Auflösung (nur wenn es KEINE SQLite-Datenbank ist!)
+    resolved_pass <- NULL
+    if (!is_sqlite) {
+        if (!is.null(env_var) && Sys.getenv(env_var) != "") {
+            resolved_pass <- Sys.getenv(env_var)
+        } else if (!is.null(password)) {
+            resolved_pass <- password
+        } else if (interactive()) {
+            message("Kein Datenbank-Passwort in Umgebungsvariablen gefunden.")
+            resolved_pass <- readline(prompt = "Bitte Datenbank-Passwort eingeben: ")
+        }
+    }
+    
     # Temporäres Client-Objekt vorab zusammenbauen, damit scrp_connect darauf zugreifen kann
     temp_sc <- structure(
         list(
