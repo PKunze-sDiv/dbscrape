@@ -953,10 +953,11 @@ scrp_run_job <- function(sc, job) {
     for (b_idx in seq_along(batch_indices)) {
         rows_in_batch <- batch_indices[[b_idx]]
         batch_data <- job$input_table[rows_in_batch, , drop = FALSE]
+        is_last_batch <- b_idx == length(batch_indices)
         
         message(sprintf("\n--- Verarbeite Batch %d/%d (%d URLs) ---", b_idx, length(batch_indices), nrow(batch_data)))
         
-        scrp_run_batch(sc = sc, job = job, batch_data = batch_data)
+        scrp_run_batch(sc = sc, job = job, batch_data = batch_data, is_last_batch = is_last_batch)
     }
     
     return(invisible(TRUE))
@@ -977,7 +978,7 @@ scrp_run_job <- function(sc, job) {
 #' 
 #' @return Unsichtbar \code{TRUE} bei erfolgreichem Durchlauf.
 #' @keywords internal
-scrp_run_batch <- function(sc, job, batch_data) {
+scrp_run_batch <- function(sc, job, batch_data, is_last_batch = FALSE) {
     urls <- batch_data[[job$input_url_column]]
     expected_tables <- names(job$target_tables)
     
@@ -1044,8 +1045,9 @@ scrp_run_batch <- function(sc, job, batch_data) {
             }
         }
         
-        # Wartezeit zwischen den Requests einhalten (falls nicht die letzte URL)
-        if (i < length(urls)) {
+        # Wartezeit zwischen den Requests einhalten (falls nicht die letzte URL überhaupt)
+        is_last_url_overall <- is_last_batch && (i == length(urls))
+        if (!is_last_url_overall) {
             Sys.sleep(stats::runif(1, job$wait_min_seconds, job$wait_max_seconds))
         }
     }

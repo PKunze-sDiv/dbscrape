@@ -4,7 +4,7 @@
 \alias{scrp_run_batch}
 \title{Führt einen Scraping-Batch für eine Liste von URLs aus}
 \usage{
-scrp_run_batch(sc, job, batch_data)
+scrp_run_batch(sc, job, batch_data, is_last_batch = FALSE)
 }
 \arguments{
 \item{sc}{Liste. Die Client-Konfiguration.}
