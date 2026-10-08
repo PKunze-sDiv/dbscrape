@@ -11,7 +11,8 @@ scrp_define_job(
   validate_fn = NULL,
   extract_fn = NULL,
   wait_min_seconds = 5,
-  wait_max_seconds = 300
+  wait_max_seconds = 300,
+  batch_size = 1
 )
 }
 \arguments{
@@ -40,6 +41,12 @@ exakt den Tabellennamen in \code{target_tables} entsprechen.
 Die Spaltennamen innerhalb der jeweiligen Data-Frames bilden die Tabellenspalten ab.}
 
 \item{wait_max_seconds}{Numerisch. Maximale Wartezeit in Sekunden (Standard: 300).}
+
+\item{batch_size}{Positive Ganzzahl. Anzahl an URLs, die abgearbeitet werden, bevor
+Daten in die Datenbank geschrieben werden (Standard: 1). Bei NULL werden alle
+Daten im Arbeitsspeicher gesammelt und erst nach dem Scraping aller URLs in die
+Datenbank geschrieben. Dient der Ausbalancierung von Arbeitsspeichernutzung und
+Datenbankzugriffen.}
 }
 \value{
 Ein Objekt der Klasse \code{scrp_job}.

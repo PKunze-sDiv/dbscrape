@@ -4,17 +4,17 @@
 \alias{scrp_write_db}
 \title{Interne Schnittstelle: Daten in die Datenbank schreiben}
 \usage{
-scrp_write_db(sc, data_table, target_table, key_columns = NULL)
+scrp_write_db(con, data_table, target_table, key_columns = NULL)
 }
 \arguments{
-\item{sc}{Das S3-Scraper-Client-Objekt.}
+\item{con}{Connection zur Datenbank.}
 
 \item{data_table}{Das Tibble mit den zu schreibenden Daten.}
 
 \item{target_table}{Charakter. Name der Ziel-Tabelle.}
 
-\item{key_columns}{Charakter-Vektor oder \خاذ{NULL}. Die Primärschlüssel für den Abgleich.
-Falls \خاذ{NULL}, werden die Daten rein chronologisch angehängt (Append).}
+\item{key_columns}{Charakter-Vektor oder \code{NULL}. Die Primärschlüssel für den Abgleich.
+Falls \code{NULL}, werden die Daten rein chronologisch angehängt (Append).}
 }
 \value{
 Logisch. TRUE bei Erfolg, FALSE wenn keine Daten übergeben wurden.

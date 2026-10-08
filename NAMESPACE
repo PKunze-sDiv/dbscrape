@@ -3,7 +3,6 @@
 export(scrp_client)
 export(scrp_create_table)
 export(scrp_define_job)
-export(scrp_execute)
 export(scrp_export_csv)
 export(scrp_result)
 export(scrp_run_job)

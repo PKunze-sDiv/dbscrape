@@ -2,18 +2,45 @@
 % Please edit documentation in R/dbscrape.R
 \name{scrp_client}
 \alias{scrp_client}
-\title{Scraper Client erstellen (S3-Klasse): Ermöglicht Datenbankzugriff und Logging}
+\title{Scraper Client erstellen (S3-Klasse): Hält die Verbindungsparameter und instanziert Logging}
 \usage{
-scrp_client(con, log_table_name = "log", use_fake_browser = FALSE)
+scrp_client(
+  driver,
+  dbname = NULL,
+  host = NULL,
+  port = NULL,
+  user = NULL,
+  password = NULL,
+  env_var = "DB_PASSWORD",
+  log_table_name = "log",
+  use_fake_browser = FALSE,
+  ...
+)
 }
 \arguments{
-\item{con}{Ein bestehendes DBI-Verbindungsobjekt (z.B. zu SQLite)}
+\item{driver}{Ein DBI-Treiber-Objekt (z.B. RSQLite::SQLite(), RPostgres::Postgres(), etc.)}
+
+\item{dbname}{Name der Datenbank oder Dateipfad (bei SQLite)}
+
+\item{host}{Server-Host (optional bei Remote-DBs)}
+
+\item{port}{Port (optional)}
+
+\item{user}{Benutzername (optional)}
+
+\item{password}{Direktes Passwort (optional)}
+
+\item{env_var}{Name der Umgebungsvariable für das Passwort (Standard: "DB_PASSWORD")}
 
 \item{log_table_name}{Name der Logging-Tabelle in der DB}
+
+\item{use_fake_browser}{Logisch. Ob chromote verwendet werden soll.}
+
+\item{...}{Weitere treiberspezifische Parameter}
 }
 \value{
-Ein S3-Objekt mit Datenbankverbindung und Kennung der Logging-Tabelle
+Ein S3-Scraper-Client-Objekt
 }
 \description{
-Scraper Client erstellen (S3-Klasse): Ermöglicht Datenbankzugriff und Logging
+Scraper Client erstellen (S3-Klasse): Hält die Verbindungsparameter und instanziert Logging
 }

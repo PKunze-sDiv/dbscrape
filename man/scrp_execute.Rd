@@ -2,39 +2,32 @@
 % Please edit documentation in R/dbscrape.R
 \name{scrp_execute}
 \alias{scrp_execute}
-\title{Führt einen HTTP-GET Request aus und verwaltet Validierung, Extraktion sowie Status-Logging}
+\title{Führt den HTTP-Request oder Browser-Abruf für eine einzelne URL aus}
 \usage{
 scrp_execute(
-  sc,
   url,
   validate_fn = NULL,
   extract_fn = NULL,
-  fail_on_redirect = FALSE
+  fail_on_redirect = FALSE,
+  use_fake_browser = FALSE
 )
 }
 \arguments{
-\item{sc}{Ein S3-Scraper-Client-Objekt (erstellt mit \code{scrp_client()}), das die DB-Verbindung hält.}
+\item{url}{Character. Die abzurufende URL.}
 
-\item{url}{Charakter-String. Die vollständig qualifizierte Ziel-URL der Webseite.}
+\item{validate_fn}{Funktion. Optionaler Validierungs-Callback, der das HTML-Dokument prüft.}
 
-\item{validate_fn}{Eine optionale Funktion zur Inhaltsprüfung (Prädikat). Muss das HTML der Website
-akzeptieren und \code{TRUE} (Inhalt valide) oder \code{FALSE} (Inhalt blockiert/ungültig) zurückgeben.}
+\item{extract_fn}{Funktion. Optionaler Extraktions-Callback, der Daten aus dem HTML-Dokument extrahiert.}
 
-\item{extract_fn}{Eine optionale Funktion zur Datenextraktion. Muss das HTML der Website akzeptieren
-und eine \code{benannte Liste von Tibbles/Data-Frames} (oder \code{NULL}) zurückgeben. Die Namen der
-Listenelemente müssen exakt mit den in \code{target_structures} definierten Tabellennamen übereinstimmen.}
+\item{fail_on_redirect}{Logical. Ob ein Redirect als Fehler gewertet werden soll.}
 
-\item{fail_on_redirect}{Logisch. Bestimmt, ob der Prozess abgebrochen und als \code{"redirected"}
-geloggt werden soll, wenn der Server die URL intern umleitet.}
+\item{use_fake_browser}{Logical. Ob ein Headless-Browser via Chromote verwendet werden soll.}
 }
 \value{
-Gibt das Ergebnis der \code{extract_fn} zurück (eine benannte Liste von Tibbles),
-das rohe HTML-Objekt (falls keine \code{extract_fn} übergeben wurde) oder \code{NULL},
-falls beim Request, der Validierung oder der Extraktion ein Fehler aufgetreten ist.
+Eine Liste mit den Elementen \code{status}, \code{http_status} und \code{data}.
 }
 \description{
-Diese Kernfunktion kapselt den gesamten Netzwerk-Traffic des Scrapers. Sie führt genau einen
-GET-Request pro URL aus, fängt typische HTTP- und Verbindungsfehler ab, validiert das
-zurückgegebene HTML über optionale Callbacks und übergibt den finalen Status an die
-Logging-Schnittstelle der Datenbank.
+Interne Engine zum Abrufen einer URL (entweder über \code{httr2} oder \code{chromote}),
+optionaler Validierung und anschließender Extraktion. Hat keine direkten Datenbank-Side-Effects.
 }
+\keyword{internal}

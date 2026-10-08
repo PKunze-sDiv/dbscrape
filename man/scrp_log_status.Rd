@@ -4,10 +4,10 @@
 \alias{scrp_log_status}
 \title{API-Schnittstelle: Status/Log in die DB schreiben}
 \usage{
-scrp_log_status(sc, url, status, http_status = NA_character_)
+scrp_log_status(con, url, status, http_status = NA_character_, log_table_name)
 }
 \arguments{
-\item{sc}{Das S3-Scraper-Client-Objekt}
+\item{con}{Connection zur Datenbank.}
 
 \item{url}{Die URL der betreffenden Seite}
 
