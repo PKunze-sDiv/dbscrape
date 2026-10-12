@@ -217,7 +217,8 @@ scrp_log_status <- function(con, url, status, http_status = NA_character_, log_t
             successful_attempts_count = if (status == "success") 1L else 0L,
             in_use = FALSE
         )
-        DBI::dbWriteTable(con, log_table_name, new_row, append = TRUE)
+        # DBI::dbWriteTable(con, log_table_name, new_row, append = TRUE)
+        DBI::dbAppendTable(con, log_table_name, new_row)
 
     }
     
@@ -245,7 +246,8 @@ scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
     
     if (!table_existed) {
         # Tabelle existiert noch nicht -> Struktur leeren und neu anlegen
-        DBI::dbWriteTable(con, target_table, data_table |> dplyr::slice(0))
+        # DBI::dbWriteTable(con, target_table, data_table |> dplyr::slice(0))
+        DBI::dbCreateTable(con, target_table, data_table)
     } else {
         # Tabelle existiert -> Prüfen, ob neue Spalten dynamisch hinzugefügt werden müssen
         existing_cols <- DBI::dbListFields(con, target_table)
@@ -263,7 +265,8 @@ scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
     # WEICHE: Append (keine Keys) vs. Upsert (mit Keys)
     if (is.null(key_columns) || length(key_columns) == 0) {
         # Reines Anhängen (Append) für Auto-ID-Tabellen / Duplikate
-        DBI::dbWriteTable(con, target_table, data_table, append = TRUE, row.names = FALSE)
+        # DBI::dbWriteTable(con, target_table, data_table, append = TRUE, row.names = FALSE)
+        DBI::dbAppendTable(con, target_table, data_table)
     } else {
         # Upsert-Logik für eindeutige Schlüssel
         db_tbl <- dplyr::tbl(con, target_table)
@@ -1102,6 +1105,7 @@ scrp_run_batch <- function(sc, job, batch_data, is_last_batch = FALSE) {
     })
     
     if (!success) {
+        DBI::dbDisconnect(con)
         stop("Datenbank konnte nicht beschrieben werden. Programm wird abgebrochen.")
     }
     
