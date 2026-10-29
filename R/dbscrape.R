@@ -161,8 +161,7 @@ scrp_client <- function(
                 last_scrape_status TEXT,
                 last_scrape_http_status TEXT,
                 failed_attempts_count INTEGER DEFAULT 0,
-                successful_attempts_count INTEGER DEFAULT 0,
-                in_use INTEGER DEFAULT 0
+                successful_attempts_count INTEGER DEFAULT 0
             );",
             DBI::dbQuoteIdentifier(con, log_table_name)
         ))
@@ -197,8 +196,7 @@ scrp_log_status <- function(con, url, status, http_status = NA_character_, log_t
                 last_scrape_status = ?, 
                 last_scrape_http_status = ?, 
                 failed_attempts_count = failed_attempts_count + %d,
-                successful_attempts_count = successful_attempts_count + %d,
-                in_use = 0
+                successful_attempts_count = successful_attempts_count + %d
             WHERE url = ?", 
             log_table_name,
             if (status == "success") 0L else 1L,
@@ -214,8 +212,7 @@ scrp_log_status <- function(con, url, status, http_status = NA_character_, log_t
             last_scrape_status = status,
             last_scrape_http_status = http_status,
             failed_attempts_count = if (status == "success") 0L else 1L,
-            successful_attempts_count = if (status == "success") 1L else 0L,
-            in_use = FALSE
+            successful_attempts_count = if (status == "success") 1L else 0L
         )
         # DBI::dbWriteTable(con, log_table_name, new_row, append = TRUE)
         DBI::dbAppendTable(con, log_table_name, new_row)
@@ -1060,53 +1057,32 @@ scrp_run_batch <- function(sc, job, batch_data, is_last_batch = FALSE) {
     con <- scrp_connect(sc)
     on.exit(try(DBI::dbDisconnect(con), silent = TRUE), add = TRUE)
     
-    # TRANSAKTION STARTEN: Garantiert Konsistenz (Entweder alles oder nichts)
-    DBI::dbBegin(con)
-    
-    success <- tryCatch({
-        
-        # 1. Gesammelte Datentabellen in die DB schreiben
-        for (table_name in expected_tables) {
-            if (length(data_buffers[[table_name]]) > 0) {
-                combined_data <- dplyr::bind_rows(data_buffers[[table_name]])
-                table_config <- job$target_tables[[table_name]]
-                
-                scrp_write_db(
-                    con          = con, 
-                    data_table   = combined_data, 
-                    target_table = table_name, 
-                    key_columns  = table_config$target_key_columns
-                )
-            }
+    # 1. Gesammelte Datentabellen in die DB schreiben
+    for (table_name in expected_tables) {
+        if (length(data_buffers[[table_name]]) > 0) {
+            combined_data <- dplyr::bind_rows(data_buffers[[table_name]])
+            table_config <- job$target_tables[[table_name]]
+            
+            scrp_write_db(
+                con          = con, 
+                data_table   = combined_data, 
+                target_table = table_name, 
+                key_columns  = table_config$target_key_columns
+            )
         }
-        
-        # 2. Gesammelte Logs gebatcht in die DB schreiben
-        if (length(log_buffer) > 0) {
-            for (log_entry in log_buffer) {
-                scrp_log_status(
-                    con            = con, 
-                    url            = log_entry$url, 
-                    status         = log_entry$status, 
-                    http_status    = log_entry$http_status, 
-                    log_table_name = sc$log_table_name
-                )
-            }
-        }
-        
-        # Wenn alles geklappt hat, Transaktion bestätigen
-        DBI::dbCommit(con)
-        TRUE
-        
-    }, error = function(e) {
-        # Bei jedem Fehler: Transaktion komplett rückgängig machen!
-        DBI::dbRollback(con)
-        warning(paste("Fehler beim Flush-Vorgang. Transaktion wurde zurückgerollt:", e$message))
-        FALSE
-    })
+    }
     
-    if (!success) {
-        DBI::dbDisconnect(con)
-        stop("Datenbank konnte nicht beschrieben werden. Programm wird abgebrochen.")
+    # 2. Gesammelte Logs gebatcht in die DB schreiben
+    if (length(log_buffer) > 0) {
+        for (log_entry in log_buffer) {
+            scrp_log_status(
+                con            = con, 
+                url            = log_entry$url, 
+                status         = log_entry$status, 
+                http_status    = log_entry$http_status, 
+                log_table_name = sc$log_table_name
+            )
+        }
     }
     
     return(invisible(TRUE))
