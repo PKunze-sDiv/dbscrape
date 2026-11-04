@@ -318,6 +318,7 @@ scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
 #' optionaler Validierung und anschließender Extraktion. Hat keine direkten Datenbank-Side-Effects.
 #'
 #' @param url Character. Die abzurufende URL.
+#' @param action_fn Funktion. Optionaler Steuerungs-Callback, der Aktionen wie Klicks auf der Website ausführt.
 #' @param validate_fn Funktion. Optionaler Validierungs-Callback, der das HTML-Dokument prüft.
 #' @param extract_fn Funktion. Optionaler Extraktions-Callback, der Daten aus dem HTML-Dokument extrahiert.
 #' @param fail_on_redirect Logical. Ob ein Redirect als Fehler gewertet werden soll.
@@ -327,6 +328,7 @@ scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
 #' @keywords internal
 scrp_execute <- function(
     url,
+    action_fn = NULL,
     validate_fn = NULL,
     extract_fn = NULL,
     fail_on_redirect = FALSE,
@@ -336,16 +338,46 @@ scrp_execute <- function(
     # 1. Fetch-Logik: Entweder über Fake-Browser (Chromote) oder klassisch via httr2
     fetch_result <- if (use_fake_browser) {      
         if (Sys.getenv("CHROMOTE_CHROME") == "") scrp_setup_browser()
-
+        
         tryCatch({
-            b <- chromote::ChromoteSession$new()
-            b$Page$navigate(url)
-            Sys.sleep(stats::runif(1, 4, 10))
-            html_string <- b$Runtime$evaluate("document.documentElement.outerHTML")$result$value
+            fake_browser <- chromote::ChromoteSession$new()
+            
+            # Schritt 1: Navigation
+            tryCatch({
+                fake_browser$Page$navigate(url)
+                Sys.sleep(stats::runif(1, 4, 10))
+            }, error = function(e) {
+                stop(sprintf("Browser-Navigation fehlgeschlagen: %s", e$message), call. = FALSE)
+            })
+            
+            # Schritt 2: Benutzerdefinierte Aktion (falls definiert)
+            if (!is.null(action_fn)) {
+                tryCatch({
+                    action_fn(fake_browser)
+                    Sys.sleep(1) # Kurze Beruhigungszeit für das DOM
+                }, error = function(e) {
+                    stop(sprintf("Fehler in 'action_fn()': %s", e$message), call. = FALSE)
+                })
+            }
+            
+            # Schritt 3: HTML auslesen
+            html_string <- tryCatch({
+                fake_browser$Runtime$evaluate("document.documentElement.outerHTML")$result$value
+            }, error = function(e) {
+                stop(sprintf("Konnte HTML-Inhalt nicht auslesen: %s", e$message), call. = FALSE)
+            })
+            
             html <- rvest::read_html(html_string)
-            b$close()
+            fake_browser$close()
             list(html = html, http_status = "200")
+            
         }, error = function(e) {
+            # Sicherstellen, dass der Browser bei jedem Crash geschlossen wird
+            if (exists("fake_browser") && inherits(fake_browser, "ChromoteSession")) {
+                try(fake_browser$close(), silent = TRUE)
+            }
+            # Präzise Warnung ohne URL-Dopplung oder redundantes "Status"
+            warning(sprintf(" -> %s", e$message), call. = FALSE)
             NULL
         })
         
@@ -386,13 +418,14 @@ scrp_execute <- function(
     }
     
     # Fehlerbehandlung beim Fetch-Vorgang
-    if (is.null(fetch_result) || !is.null(fetch_result$status)) {
-        if (!is.null(fetch_result$status)) return(fetch_result)
+    if (is.null(fetch_result)) {
         return(list(status = "unavailable", http_status = "BROWSER_ERROR", data = NULL))
     }
-    
-    html        <- fetch_result$html
-    http_status <- fetch_result$http_status
+    if (!is.null(fetch_result$status)) {
+        return(fetch_result)
+    }
+    html          <- fetch_result$html
+    http_status   <- fetch_result$http_status
     
     # 2. Validierung des HTML-Inhalts
     if (!is.null(validate_fn)) {
@@ -806,6 +839,16 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #'         \item{\code{target_key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
 #'         \item{\code{inherit_input_columns}}{Charakter-Vektor oder \code{NULL}. Namen von Spalten aus der \code{input_table}, die in diese spezifische Zieltabelle übernommen werden sollen (z. B. IDs oder auch die \code{"url"}).}
 #'     }
+#' @param action_fn Eine optionale Funktion für den Browser-Modus (\code{use_fake_browser = TRUE}),
+#'   die vor dem Extrahieren der Daten Aktionen auf der Website ausführt. Sie ermöglicht Interaktionen
+#'   wie Klicks, Tab-Wechsel oder Scrollen, bevor das HTML ausgelesen wird.
+#'   Die Funktion muss genau einen Parameter entgegennehmen:
+#'   \describe{
+#'     \item{\code{browser_session}}{Ein \code{chromote::ChromoteSession}-Objekt.
+#'       Über dieses Objekt können Sie direkt die Chrome DevTools Protocol (CDP) Befehle
+#'       nutzen (z. B. \code{browser_session$Runtime$evaluate(...)} oder 
+#'       \code{browser_session$Input$dispatchMouseEvent(...)}).}
+#'   }
 #' @param validate_fn Eine optionale Funktion zur Inhalts- und Blockierungsprüfung des HTML-Dokuments.
 #' @param extract_fn Eine Funktion zur Datenextraktion. Erwartet das HTML-Dokument 
 #'     der Website (ein \code{xml2::xml_document}) und soll eine benannte Liste von 
@@ -825,13 +868,25 @@ scrp_define_job <- function(
     input_table = NULL,
     input_url_column = "url",
     target_tables,
+    action_fn = NULL,
     validate_fn = NULL,
     extract_fn = NULL,
     wait_min_seconds = 5,
     wait_max_seconds = 300,
     batch_size = 1
 ) {
-    # 1. Validierung von batch_size
+    # 1. Validerung der übergebenen Funktionen
+    if (!is.null(action_fn) && !is.function(action_fn)) {
+        stop("Fehler: 'action_fn' muss eine Funktion sein.")
+    }
+    if (!is.null(validate_fn) && !is.function(validate_fn)) {
+        stop("Fehler: 'validate_fn' muss eine Funktion sein.")
+    }
+    if (!is.null(extract_fn) && !is.function(extract_fn)) {
+        stop("Fehler: 'extract_fn' muss eine Funktion sein.")
+    }
+    
+    # 2. Validierung von batch_size
     if (!is.null(batch_size)) {
         if (!is.numeric(batch_size) || length(batch_size) != 1 || is.na(batch_size) || batch_size <= 0) {
             stop("Fehler: 'batch_size' muss eine positive ganze Zahl (z.B. 1, 50) oder NULL (gebündelt am Ende) sein.")
@@ -839,12 +894,12 @@ scrp_define_job <- function(
         batch_size <- as.integer(batch_size)
     }
 
-    # 2. Validierung der target_tables
+    # 3. Validierung der target_tables
     if (!is.list(target_tables) || is.null(names(target_tables)) || any(names(target_tables) == "")) {
         stop("Fehler: 'target_tables' muss eine benannte Liste von Tabellen-Konfigurationen sein.")
     }
     
-    # 3. Detail-Validierung der Tabellen-Konfigurationen
+    # 4. Detail-Validierung der Tabellen-Konfigurationen
     for (table_name in names(target_tables)) {
         config <- target_tables[[table_name]]
         
@@ -867,11 +922,12 @@ scrp_define_job <- function(
         target_tables[[table_name]] <- config
     }
     
-    # 4. Zusammenbau
+    # 5. Zusammenbau
     job_args <- list(
         input_table           = input_table,
         input_url_column      = input_url_column,
         target_tables         = target_tables,
+        action_fn             = action_fn,
         validate_fn           = validate_fn,
         extract_fn            = extract_fn,
         wait_min_seconds      = wait_min_seconds,
@@ -992,7 +1048,8 @@ scrp_run_batch <- function(sc, job, batch_data, is_last_batch = FALSE) {
         # Request ausführen (liefert Daten und Status zurück, ohne DB-Side-Effects)
         res <- scrp_execute(
             url              = url, 
-            validate_fn      = job$validate_fn, 
+            action_fn        = job$action_fn,
+            validate_fn      = job$validate_fn,
             extract_fn       = job$extract_fn,
             use_fake_browser = sc$use_fake_browser
         )
