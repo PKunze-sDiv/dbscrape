@@ -73,7 +73,7 @@ scrp_connect <- function(sc) {
 #' @param password Direktes Passwort (optional)
 #' @param env_var Name der Umgebungsvariable für das Passwort (Standard: "DB_PASSWORD")
 #' @param log_table_name Name der Logging-Tabelle in der DB
-#' @param use_fake_browser Logisch. Ob chromote verwendet werden soll.
+#' @param use_virtual_browser Logisch. Ob chromote verwendet werden soll.
 #' @param ... Weitere treiberspezifische Parameter
 #'
 #' @return Ein S3-Scraper-Client-Objekt
@@ -88,7 +88,7 @@ scrp_client <- function(
     password = NULL, 
     env_var = "DB_PASSWORD",
     log_table_name = "log", 
-    use_fake_browser = FALSE,
+    use_virtual_browser = FALSE,
     ...
 ) {
 
@@ -120,7 +120,7 @@ scrp_client <- function(
             env_var    = env_var,
             extra_args = list(...),
             log_table_name = log_table_name,
-            use_fake_browser = use_fake_browser
+            use_virtual_browser = use_virtual_browser
         ), 
         class = "scrp_client"
     )
@@ -322,7 +322,7 @@ scrp_write_db <- function(con, data_table, target_table, key_columns = NULL) {
 #' @param validate_fn Funktion. Optionaler Validierungs-Callback, der das HTML-Dokument prüft.
 #' @param extract_fn Funktion. Optionaler Extraktions-Callback, der Daten aus dem HTML-Dokument extrahiert.
 #' @param fail_on_redirect Logical. Ob ein Redirect als Fehler gewertet werden soll.
-#' @param use_fake_browser Logical. Ob ein Headless-Browser via Chromote verwendet werden soll.
+#' @param use_virtual_browser Logical. Ob ein Headless-Browser via Chromote verwendet werden soll.
 #' 
 #' @return Eine Liste mit den Elementen \code{status}, \code{http_status} und \code{data}.
 #' @keywords internal
@@ -332,19 +332,19 @@ scrp_execute <- function(
     validate_fn = NULL,
     extract_fn = NULL,
     fail_on_redirect = FALSE,
-    use_fake_browser = FALSE
+    use_virtual_browser = FALSE
 ) {
     
     # 1. Fetch-Logik: Entweder über Fake-Browser (Chromote) oder klassisch via httr2
-    fetch_result <- if (use_fake_browser) {      
+    fetch_result <- if (use_virtual_browser) {      
         if (Sys.getenv("CHROMOTE_CHROME") == "") scrp_setup_browser()
         
         tryCatch({
-            fake_browser <- chromote::ChromoteSession$new()
+            virtual_browser <- chromote::ChromoteSession$new()
             
             # Schritt 1: Navigation
             tryCatch({
-                fake_browser$Page$navigate(url)
+                virtual_browser$Page$navigate(url)
                 Sys.sleep(stats::runif(1, 4, 10))
             }, error = function(e) {
                 stop(sprintf("Browser-Navigation fehlgeschlagen: %s", e$message), call. = FALSE)
@@ -353,7 +353,7 @@ scrp_execute <- function(
             # Schritt 2: Benutzerdefinierte Aktion (falls definiert)
             if (!is.null(action_fn)) {
                 tryCatch({
-                    action_fn(fake_browser)
+                    action_fn(virtual_browser)
                     Sys.sleep(1) # Kurze Beruhigungszeit für das DOM
                 }, error = function(e) {
                     stop(sprintf("Fehler in 'action_fn()': %s", e$message), call. = FALSE)
@@ -362,19 +362,19 @@ scrp_execute <- function(
             
             # Schritt 3: HTML auslesen
             html_string <- tryCatch({
-                fake_browser$Runtime$evaluate("document.documentElement.outerHTML")$result$value
+                virtual_browser$Runtime$evaluate("document.documentElement.outerHTML")$result$value
             }, error = function(e) {
                 stop(sprintf("Konnte HTML-Inhalt nicht auslesen: %s", e$message), call. = FALSE)
             })
             
             html <- rvest::read_html(html_string)
-            fake_browser$close()
+            virtual_browser$close()
             list(html = html, http_status = "200")
             
         }, error = function(e) {
             # Sicherstellen, dass der Browser bei jedem Crash geschlossen wird
-            if (exists("fake_browser") && inherits(fake_browser, "ChromoteSession")) {
-                try(fake_browser$close(), silent = TRUE)
+            if (exists("virtual_browser") && inherits(virtual_browser, "ChromoteSession")) {
+                try(virtual_browser$close(), silent = TRUE)
             }
             # Präzise Warnung ohne URL-Dopplung oder redundantes "Status"
             warning(sprintf(" -> %s", e$message), call. = FALSE)
@@ -839,15 +839,15 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #'         \item{\code{target_key_columns}}{Charakter-Vektor oder \code{NULL}. Die Spaltennamen, die den Primärschlüssel für ein Upsert bilden.}
 #'         \item{\code{inherit_input_columns}}{Charakter-Vektor oder \code{NULL}. Namen von Spalten aus der \code{input_table}, die in diese spezifische Zieltabelle übernommen werden sollen (z. B. IDs oder auch die \code{"url"}).}
 #'     }
-#' @param action_fn Eine optionale Funktion für den Browser-Modus (\code{use_fake_browser = TRUE}),
+#' @param action_fn Eine optionale Funktion für den Browser-Modus (\code{use_virtual_browser = TRUE}),
 #'   die vor dem Extrahieren der Daten Aktionen auf der Website ausführt. Sie ermöglicht Interaktionen
 #'   wie Klicks, Tab-Wechsel oder Scrollen, bevor das HTML ausgelesen wird.
 #'   Die Funktion muss genau einen Parameter entgegennehmen:
 #'   \describe{
-#'     \item{\code{browser_session}}{Ein \code{chromote::ChromoteSession}-Objekt.
+#'     \item{\code{virtual_browser}}{Ein \code{chromote::ChromoteSession}-Objekt.
 #'       Über dieses Objekt können Sie direkt die Chrome DevTools Protocol (CDP) Befehle
-#'       nutzen (z. B. \code{browser_session$Runtime$evaluate(...)} oder 
-#'       \code{browser_session$Input$dispatchMouseEvent(...)}).}
+#'       nutzen (z. B. \code{virtual_browser$Runtime$evaluate(...)} oder 
+#'       \code{virtual_browser$Input$dispatchMouseEvent(...)}).}
 #'   }
 #' @param validate_fn Eine optionale Funktion zur Inhalts- und Blockierungsprüfung des HTML-Dokuments.
 #' @param extract_fn Eine Funktion zur Datenextraktion. Erwartet das HTML-Dokument 
@@ -1051,7 +1051,7 @@ scrp_run_batch <- function(sc, job, batch_data, is_last_batch = FALSE) {
             action_fn        = job$action_fn,
             validate_fn      = job$validate_fn,
             extract_fn       = job$extract_fn,
-            use_fake_browser = sc$use_fake_browser
+            use_virtual_browser = sc$use_virtual_browser
         )
         
         # Status-Log für den Batch-Puffer vormerken
