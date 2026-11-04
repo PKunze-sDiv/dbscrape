@@ -863,6 +863,38 @@ scrp_export_csv <- function(sc, table_name, file_path) {
 #'     Datenbankzugriffen.
 #'
 #' @return Ein Objekt der Klasse \code{scrp_job}.
+#' @examples
+#' \dontrun{
+#'     # Beispiel: Dynamisches Warten auf ein aktives Element einer Website
+#'     tab_switcher <- function(virtual_browser) {
+#'         # Klick auf den Tab ausführen
+#'         virtual_browser$Runtime$evaluate("document.querySelector('.properties-tab').click();")
+#'         # Polling: Dynamisch warten, bis das neue Element gerendert wurde (max 10s)
+#'         start_time <- Sys.time()
+#'         repeat {
+#'             is_ready <- tryCatch({
+#'                 res <- virtual_browser$Runtime$evaluate("document.querySelector('.properties-data') !== null")
+#'                 isTRUE(res$result$value)
+#'             }, error = function(e) FALSE)
+#'             if (is_ready) break
+#'             if (as.numeric(Sys.time() - start_time, units = "secs") > 10) {
+#'                 stop("Timeout beim Laden des Tabs.")
+#'             }
+#'             Sys.sleep(0.2)
+#'         }
+#'     }
+#'     
+#'     # Scraping-Job definieren
+#'     job <- scrp_define_job(
+#'         target_tables = list(
+#'             results = list(
+#'                 target_key_columns = "id"
+#'             )
+#'         ),
+#'         action_fn  = tab_switcher,
+#'         extract_fn = my_extractor
+#'     )
+#' }
 #' @export
 scrp_define_job <- function(
     input_table = NULL,
